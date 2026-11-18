@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 
 export default function BoletimNotas({ perfil }) {
+  const [vinculos, setVinculos] = useState([])
   const [turmas, setTurmas] = useState([])
   const [turmaId, setTurmaId] = useState('')
   const [disciplinasTurma, setDisciplinasTurma] = useState([])
@@ -15,13 +16,25 @@ export default function BoletimNotas({ perfil }) {
   const [salvando, setSalvando] = useState(false)
   const [mensagem, setMensagem] = useState('')
 
-  useEffect(() => {
-    carregarTurmas()
-  }, [])
+  const ehAdmin = perfil?.cargo === 'Administrador(a) do Sistema'
+  const ehDocenteOuAdmin =
+    ehAdmin || perfil?.cargo?.toLowerCase().includes('professor')
 
   useEffect(() => {
-    if (turmaId) carregarDisciplinasDaTurma()
-  }, [turmaId])
+    if (ehDocenteOuAdmin) {
+      carregarPermissoes()
+    }
+  }, [perfil, ehDocenteOuAdmin])
+
+  useEffect(() => {
+    if (turmaId && vinculos.length > 0) {
+      const discs = vinculos.filter((v) => v.turma_id === turmaId)
+      setDisciplinasTurma(discs)
+      if (discs.length > 0 && !discs.some((d) => d.disciplina === disciplina)) {
+        setDisciplina(discs[0].disciplina)
+      }
+    }
+  }, [turmaId, vinculos])
 
   useEffect(() => {
     if (turmaId && disciplina) {
@@ -33,40 +46,47 @@ export default function BoletimNotas({ perfil }) {
     }
   }, [turmaId, disciplina, disciplinasTurma])
 
-  async function carregarTurmas() {
-    const { data } = await supabase.from('turmas').select('*').order('nome')
-    if (data && data.length > 0) {
-      setTurmas(data)
-      setTurmaId(data[0].id)
-    }
+  if (!ehDocenteOuAdmin) {
+    return (
+      <section className="panel-card">
+        <h3>Acesso Restrito ao Corpo Docente</h3>
+        <p style={{ color: '#64748b', marginTop: 6 }}>
+          Apenas professores podem lançar ou alterar notas bimestrais. Para consultar boletins consolidados, acesse Boletim e Relatórios.
+        </p>
+      </section>
+    )
   }
 
-  async function carregarDisciplinasDaTurma() {
-    const { data: vincs } = await supabase
-      .from('professores_turmas')
-      .select('*')
-      .eq('turma_id', turmaId)
-      .order('disciplina')
+  async function carregarPermissoes() {
+    const [{ data: todasTurmas }, { data: todosVinculos }] = await Promise.all([
+      supabase.from('turmas').select('*').order('nome'),
+      supabase.from('professores_turmas').select('*').order('disciplina'),
+    ])
 
-    if (vincs && vincs.length > 0) {
-      setDisciplinasTurma(vincs)
-      if (!vincs.some((v) => v.disciplina === disciplina)) {
-        setDisciplina(vincs[0].disciplina)
-      }
-    } else {
-      const { data: todasDisc } = await supabase.from('disciplinas').select('nome').order('nome')
-      const fallback = (todasDisc || []).map((d) => ({
-        disciplina: d.nome,
-        professor_nome: 'Não atribuído',
-      }))
-      setDisciplinasTurma(fallback)
-      if (fallback.length > 0) setDisciplina(fallback[0].disciplina)
+    const filtrados = (todosVinculos || []).filter((v) => {
+      if (ehAdmin) return true
+      const mesmoId = v.professor_id && v.professor_id === perfil.id
+      const mesmoNome =
+        v.professor_nome &&
+        perfil.nome_completo &&
+        v.professor_nome.toLowerCase().includes(perfil.nome_completo.split(' ')[0].toLowerCase()) &&
+        v.professor_nome.toLowerCase().includes(perfil.nome_completo.split(' ').slice(-1)[0].toLowerCase())
+      return mesmoId || mesmoNome
+    })
+
+    setVinculos(filtrados)
+
+    const idsPermitidos = new Set(filtrados.map((v) => v.turma_id))
+    const turmasPerm = (todasTurmas || []).filter((t) => idsPermitidos.has(t.id))
+    setTurmas(turmasPerm)
+    if (turmasPerm.length > 0) {
+      setTurmaId(turmasPerm[0].id)
     }
   }
 
   async function handleSalvarProfessor(e) {
     e.preventDefault()
-    if (!novoProfNome.trim()) return
+    if (!ehAdmin || !novoProfNome.trim()) return
 
     const { error } = await supabase
       .from('professores_turmas')
@@ -84,7 +104,7 @@ export default function BoletimNotas({ perfil }) {
     } else {
       setProfessorAtual(novoProfNome.trim())
       setEditandoProf(false)
-      carregarDisciplinasDaTurma()
+      carregarPermissoes()
       setMensagem('Docente atualizado com sucesso!')
       setTimeout(() => setMensagem(''), 3500)
     }
@@ -114,14 +134,14 @@ export default function BoletimNotas({ perfil }) {
   }
 
   function handleNotaChange(alunoId, bimestre, valor) {
-    if (valor !== '' && (Number(valor) < 0 || Number(valor) > 10)) return
+    if (valor !== '' && (Number(valor) < 0 || Number(valor) > 25)) return
     setNotasMap((prev) => ({
       ...prev,
       [alunoId]: { ...prev[alunoId], [bimestre]: valor },
     }))
   }
 
-  function calcularMedia(notasAluno) {
+  function calcularTotalAnual(notasAluno) {
     const valores = [1, 2, 3, 4]
       .map((b) => notasAluno?.[b])
       .filter((v) => v !== '' && v !== undefined && !isNaN(Number(v)))
@@ -129,7 +149,7 @@ export default function BoletimNotas({ perfil }) {
 
     if (valores.length === 0) return null
     const soma = valores.reduce((acc, n) => acc + n, 0)
-    return (soma / valores.length).toFixed(1)
+    return soma.toFixed(1)
   }
 
   async function handleSalvarNotas(e) {
@@ -162,6 +182,19 @@ export default function BoletimNotas({ perfil }) {
       if (error) {
         alert('Erro ao salvar notas: ' + error.message)
       } else {
+        const turmaObj = turmas.find((t) => t.id === turmaId)
+        await supabase.from('historico_auditoria').insert([
+          {
+            autor_id: perfil.id,
+            autor_nome: perfil.nome_completo,
+            autor_cargo: perfil.cargo,
+            modulo: 'Lançar Notas',
+            acao: 'Atualização de Notas Bimestrais',
+            turma_nome: turmaObj ? `${turmaObj.nome} (${turmaObj.turno})` : '',
+            detalhes: `Disciplina: ${disciplina} • ${registros.length} lançamento(s) atualizado(s).`,
+          },
+        ])
+
         setMensagem('Notas salvas com sucesso!')
         setTimeout(() => setMensagem(''), 4000)
       }
@@ -170,12 +203,12 @@ export default function BoletimNotas({ perfil }) {
   }
 
   return (
-    <section className="panel-card">
+    <section className="panel-card" style={{ borderTop: '4px solid var(--primary)' }}>
       <div className="panel-header">
         <div>
           <h3>Lançar Notas por Bimestre</h3>
           <p style={{ fontSize: '0.85rem', color: '#64748b', marginTop: 4 }}>
-            Registre notas de 0 a 10 e gerencie o docente responsável por cada disciplina.
+            Cada bimestre vale até <strong>25,0 pontos</strong> (100,0 pontos anuais • mínimo de <strong>60,0 pontos</strong> para média).
           </p>
         </div>
       </div>
@@ -184,6 +217,7 @@ export default function BoletimNotas({ perfil }) {
         <div className="form-group col-6">
           <label>Turma</label>
           <select value={turmaId} onChange={(e) => setTurmaId(e.target.value)}>
+            {turmas.length === 0 && <option value="">Nenhuma turma vinculada</option>}
             {turmas.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.nome} • {t.turno}
@@ -223,13 +257,15 @@ export default function BoletimNotas({ perfil }) {
             <div style={{ fontSize: '0.9rem' }}>
               <strong>Docente:</strong> {professorAtual} • <strong>Disciplina:</strong> {disciplina}
             </div>
-            <button
-              type="button"
-              onClick={() => setEditandoProf(true)}
-              className="btn-sm btn-pending"
-            >
-              Alterar Docente
-            </button>
+            {ehAdmin && (
+              <button
+                type="button"
+                onClick={() => setEditandoProf(true)}
+                className="btn-sm btn-pending"
+              >
+                Alterar Docente
+              </button>
+            )}
           </>
         ) : (
           <form
@@ -267,7 +303,7 @@ export default function BoletimNotas({ perfil }) {
       {mensagem && <div className="alert alert-success">{mensagem}</div>}
 
       {alunos.length === 0 ? (
-        <p style={{ color: '#64748b' }}>Nenhum aluno matriculado nesta turma.</p>
+        <p style={{ color: '#64748b' }}>Nenhum aluno disponível para esta seleção.</p>
       ) : (
         <form onSubmit={handleSalvarNotas}>
           <div className="table-responsive">
@@ -275,32 +311,32 @@ export default function BoletimNotas({ perfil }) {
               <thead>
                 <tr>
                   <th>Aluno • {alunos.length}</th>
-                  <th style={{ width: 90 }}>1º Bim</th>
-                  <th style={{ width: 90 }}>2º Bim</th>
-                  <th style={{ width: 90 }}>3º Bim</th>
-                  <th style={{ width: 90 }}>4º Bim</th>
-                  <th>Média</th>
-                  <th>Situação</th>
+                  <th style={{ width: 95, textAlign: 'center' }}>1º Bim (25)</th>
+                  <th style={{ width: 95, textAlign: 'center' }}>2º Bim (25)</th>
+                  <th style={{ width: 95, textAlign: 'center' }}>3º Bim (25)</th>
+                  <th style={{ width: 95, textAlign: 'center' }}>4º Bim (25)</th>
+                  <th style={{ textAlign: 'center' }}>Total (100)</th>
+                  <th style={{ textAlign: 'center' }}>Situação</th>
                 </tr>
               </thead>
               <tbody>
                 {alunos.map((aluno) => {
-                  const media = calcularMedia(notasMap[aluno.id])
+                  const total = calcularTotalAnual(notasMap[aluno.id])
                   return (
                     <tr key={aluno.id}>
                       <td><strong>{aluno.nome_completo}</strong></td>
                       {[1, 2, 3, 4].map((bim) => (
-                        <td key={bim}>
+                        <td key={bim} style={{ textAlign: 'center' }}>
                           <input
                             type="number"
                             step="0.5"
                             min="0"
-                            max="10"
+                            max="25"
                             placeholder="-"
                             value={notasMap[aluno.id]?.[bim] ?? ''}
                             onChange={(e) => handleNotaChange(aluno.id, bim, e.target.value)}
                             style={{
-                              width: '70px',
+                              width: '74px',
                               padding: '6px 8px',
                               borderRadius: 6,
                               border: '1px solid var(--border)',
@@ -309,14 +345,18 @@ export default function BoletimNotas({ perfil }) {
                           />
                         </td>
                       ))}
-                      <td><strong>{media !== null ? media : '-'}</strong></td>
-                      <td>
-                        {media === null ? (
+                      <td style={{ textAlign: 'center' }}>
+                        <strong style={{ color: 'var(--primary-dark)' }}>
+                          {total !== null ? total : '-'}
+                        </strong>
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {total === null ? (
                           <span style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Pendente</span>
-                        ) : Number(media) >= 6 ? (
+                        ) : Number(total) >= 60 ? (
                           <span className="status-pill status-ativo">Na média</span>
                         ) : (
-                          <span className="status-pill status-bloqueado">Abaixo da média</span>
+                          <span className="status-pill status-pendente">Sem média</span>
                         )}
                       </td>
                     </tr>

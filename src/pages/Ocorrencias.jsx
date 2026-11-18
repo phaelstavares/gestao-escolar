@@ -1,36 +1,76 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 
+function verificarGestaoCompleta(cargo = '') {
+  const c = cargo.toLowerCase()
+  return (
+    c.includes('administrador') ||
+    c.includes('diretor') ||
+    c.includes('vice') ||
+    c.includes('secretári') ||
+    c.includes('secretari') ||
+    c.includes('supervisor')
+  )
+}
+
 export default function Ocorrencias({ perfil }) {
   const [turmas, setTurmas] = useState([])
+  const [turmaId, setTurmaId] = useState('')
   const [alunos, setAlunos] = useState([])
-  const [ocorrencias, setOcorrencias] = useState([])
-  const [salvando, setSalvando] = useState(false)
-  const [arquivo, setArquivo] = useState(null)
+  const [alunoId, setAlunoId] = useState('')
+  const [dataOcorrencia, setDataOcorrencia] = useState(() => new Date().toISOString().split('T')[0])
+  const [tipoOcorrencia, setTipoOcorrencia] = useState('Comportamental / Disciplinar')
+  const [gravidade, setGravidade] = useState('Leve')
+  const [descricao, setDescricao] = useState('')
+  const [providencias, setProvidencias] = useState('')
 
-  const [form, setForm] = useState({
-    turma_id: '',
-    aluno_id: '',
-    tipo: 'Pedagógica',
-    data_ocorrencia: new Date().toISOString().split('T')[0],
-    descricao: '',
-    providencia: '',
-  })
+  const [ocorrencias, setOcorrencias] = useState([])
+  const [filtroTurmaHist, setFiltroTurmaHist] = useState('todas')
+  const [buscaTexto, setBuscaTexto] = useState('')
+  const [salvando, setSalvando] = useState(false)
+  const [mensagem, setMensagem] = useState('')
+
+  const ehGestao = verificarGestaoCompleta(perfil?.cargo)
 
   useEffect(() => {
     carregarTurmas()
     carregarOcorrencias()
-  }, [])
+  }, [perfil])
 
   useEffect(() => {
-    if (form.turma_id) carregarAlunosDaTurma(form.turma_id)
-  }, [form.turma_id])
+    if (turmaId) {
+      carregarAlunosDaTurma(turmaId)
+    }
+  }, [turmaId])
 
   async function carregarTurmas() {
-    const { data } = await supabase.from('turmas').select('*').order('nome')
-    if (data && data.length > 0) {
-      setTurmas(data)
-      setForm((prev) => ({ ...prev, turma_id: data[0].id }))
+    const [{ data: todasTurmas }, { data: vinculos }] = await Promise.all([
+      supabase.from('turmas').select('*').order('nome'),
+      supabase.from('professores_turmas').select('turma_id, professor_id, professor_nome'),
+    ])
+
+    let listaFinal = todasTurmas || []
+
+    if (!ehGestao && perfil) {
+      const idsPermitidos = new Set(
+        (vinculos || [])
+          .filter((v) => {
+            const mesmoId = v.professor_id && v.professor_id === perfil.id
+            const mesmoNome =
+              v.professor_nome &&
+              perfil.nome_completo &&
+              v.professor_nome.toLowerCase().includes(perfil.nome_completo.split(' ')[0].toLowerCase()) &&
+              v.professor_nome.toLowerCase().includes(perfil.nome_completo.split(' ').slice(-1)[0].toLowerCase())
+            return mesmoId || mesmoNome
+          })
+          .map((v) => v.turma_id)
+      )
+      listaFinal = listaFinal.filter((t) => idsPermitidos.has(t.id))
+    }
+
+    setTurmas(listaFinal)
+    if (listaFinal.length > 0) {
+      setTurmaId(listaFinal[0].id)
     }
   }
 
@@ -43,56 +83,45 @@ export default function Ocorrencias({ perfil }) {
 
     const lista = data || []
     setAlunos(lista)
-    setForm((prev) => ({ ...prev, aluno_id: lista.length > 0 ? lista[0].id : '' }))
+    setAlunoId(lista.length > 0 ? lista[0].id : '')
   }
 
   async function carregarOcorrencias() {
-    const { data } = await supabase
+    let query = supabase
       .from('ocorrencias')
-      .select('*, alunos(nome_completo), turmas(nome)')
+      .select('*, alunos(nome_completo), turmas(nome, turno)')
       .order('data_ocorrencia', { ascending: false })
+      .order('criado_em', { ascending: false })
 
-    if (data) setOcorrencias(data)
+    // Professores enxergam apenas as ocorrências registradas por eles próprios
+    if (!ehGestao) {
+      query = query.eq('registrado_por', perfil.id)
+    }
+
+    const { data } = await query
+    setOcorrencias(data || [])
   }
 
-  async function handleRegistrar(e) {
+  async function handleRegistrarOcorrencia(e) {
     e.preventDefault()
-    if (!form.aluno_id || !form.descricao.trim()) return
+    if (!turmaId || !alunoId || !descricao.trim()) return
 
     setSalvando(true)
-    let anexoUrl = null
-    let anexoNome = null
-
-    if (arquivo) {
-      const ext = arquivo.name.split('.').pop()
-      const caminho = `ocorrencias/${form.aluno_id}_${Date.now()}.${ext}`
-
-      const { error: upErr } = await supabase.storage
-        .from('atestados')
-        .upload(caminho, arquivo, { upsert: true })
-
-      if (upErr) {
-        alert('Erro ao anexar arquivo: ' + upErr.message)
-        setSalvando(false)
-        return
-      }
-
-      const { data: pubData } = supabase.storage.from('atestados').getPublicUrl(caminho)
-      anexoUrl = pubData?.publicUrl || null
-      anexoNome = arquivo.name
-    }
+    setMensagem('')
 
     const { error } = await supabase.from('ocorrencias').insert([
       {
-        turma_id: form.turma_id,
-        aluno_id: form.aluno_id,
-        tipo: form.tipo,
-        data_ocorrencia: form.data_ocorrencia,
-        descricao: form.descricao,
-        providencia: form.providencia || null,
-        anexo_url: anexoUrl,
-        anexo_nome: anexoNome,
-        registrado_por_nome: perfil.nome_completo,
+        turma_id: turmaId,
+        aluno_id: alunoId,
+        data_ocorrencia: dataOcorrencia,
+        tipo_ocorrencia: tipoOcorrencia,
+        gravidade,
+        descricao: descricao.trim(),
+        providencias: providencias.trim() || null,
+        registrado_por: perfil.id,
+        autor_nome: perfil.nome_completo,
+        autor_cargo: perfil.cargo,
+        status_acompanhamento: 'Registrada',
       },
     ])
 
@@ -101,166 +130,259 @@ export default function Ocorrencias({ perfil }) {
     if (error) {
       alert('Erro ao registrar ocorrência: ' + error.message)
     } else {
-      setForm((prev) => ({ ...prev, descricao: '', providencia: '' }))
-      setArquivo(null)
+      setDescricao('')
+      setProvidencias('')
+      setMensagem('Ocorrência registrada com sucesso!')
       carregarOcorrencias()
+      setTimeout(() => setMensagem(''), 4000)
     }
   }
 
+  async function handleAtualizarStatus(id, novoStatus) {
+    if (!ehGestao) return
+    const { error } = await supabase
+      .from('ocorrencias')
+      .update({ status_acompanhamento: novoStatus })
+      .eq('id', id)
+
+    if (!error) carregarOcorrencias()
+  }
+
+  const ocorrenciasFiltradas = ocorrencias.filter((oc) => {
+    const bateTurma = filtroTurmaHist === 'todas' ? true : oc.turma_id === filtroTurmaHist
+    const texto = buscaTexto.toLowerCase()
+    const bateTexto =
+      !texto ||
+      (oc.alunos?.nome_completo || '').toLowerCase().includes(texto) ||
+      (oc.descricao || '').toLowerCase().includes(texto) ||
+      (oc.autor_nome || '').toLowerCase().includes(texto)
+    return bateTurma && bateTexto
+  })
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '22px' }}>
+      {/* FORMULÁRIO DE REGISTRO */}
       <section className="panel-card">
         <div className="panel-header">
           <div>
-            <h3>Registrar Ocorrência</h3>
+            <h3>Registrar Ocorrência Escolar</h3>
             <p style={{ fontSize: '0.85rem', color: '#64748b', marginTop: 4 }}>
-              Acompanhamento individual do aluno e anexo de documentos.
+              Todo registro fica vinculado automaticamente ao servidor que o efetuou.
             </p>
           </div>
         </div>
 
-        <form onSubmit={handleRegistrar}>
+        <div
+          style={{
+            marginBottom: 18,
+            padding: '10px 14px',
+            background: '#f0f7fa',
+            borderLeft: '4px solid var(--primary)',
+            borderRadius: 6,
+            fontSize: '0.88rem',
+            color: '#0f172a',
+          }}
+        >
+          <strong>Responsável pelo registro:</strong> {perfil.nome_completo} •{' '}
+          <span>{perfil.cargo}</span>
+        </div>
+
+        {mensagem && <div className="alert alert-success">{mensagem}</div>}
+
+        <form onSubmit={handleRegistrarOcorrencia}>
           <div className="form-grid">
             <div className="form-group col-4">
               <label>Turma</label>
-              <select
-                value={form.turma_id}
-                onChange={(e) => setForm({ ...form, turma_id: e.target.value })}
-              >
+              <select value={turmaId} onChange={(e) => setTurmaId(e.target.value)} required>
                 {turmas.map((t) => (
-                  <option key={t.id} value={t.id}>{t.nome}</option>
+                  <option key={t.id} value={t.id}>
+                    {t.nome} • {t.turno}
+                  </option>
                 ))}
               </select>
             </div>
 
-            <div className="form-group col-4">
+            <div className="form-group col-5">
               <label>Aluno</label>
-              <select
-                required
-                value={form.aluno_id}
-                onChange={(e) => setForm({ ...form, aluno_id: e.target.value })}
-              >
+              <select value={alunoId} onChange={(e) => setAlunoId(e.target.value)} required>
                 {alunos.map((a) => (
-                  <option key={a.id} value={a.id}>{a.nome_completo}</option>
+                  <option key={a.id} value={a.id}>
+                    {a.nome_completo}
+                  </option>
                 ))}
               </select>
             </div>
 
-            <div className="form-group col-4">
-              <label>Categoria</label>
-              <select
-                value={form.tipo}
-                onChange={(e) => setForm({ ...form, tipo: e.target.value })}
-              >
-                <option value="Pedagógica">Pedagógica</option>
-                <option value="Saúde / Atestado">Saúde / Atestado</option>
-                <option value="Disciplinar">Disciplinar</option>
-                <option value="Atendimento aos Pais">Atendimento aos Pais</option>
-                <option value="Elogio / Destaque">Elogio / Destaque</option>
-              </select>
-            </div>
-
-            <div className="form-group col-4">
+            <div className="form-group col-3">
               <label>Data</label>
               <input
                 type="date"
                 required
-                value={form.data_ocorrencia}
-                onChange={(e) => setForm({ ...form, data_ocorrencia: e.target.value })}
+                value={dataOcorrencia}
+                onChange={(e) => setDataOcorrencia(e.target.value)}
               />
             </div>
 
-            <div className="form-group col-8">
-              <label>Providência</label>
+            <div className="form-group col-6">
+              <label>Classificação</label>
+              <select value={tipoOcorrencia} onChange={(e) => setTipoOcorrencia(e.target.value)}>
+                <option value="Comportamental / Disciplinar">Comportamental / Disciplinar</option>
+                <option value="Pedagógica / Rendimento">Pedagógica / Rendimento</option>
+                <option value="Saúde / Atendimento">Saúde / Atendimento</option>
+                <option value="Atraso / Saída Antecipada">Atraso / Saída Antecipada</option>
+                <option value="Convocação de Responsáveis">Convocação de Responsáveis</option>
+              </select>
+            </div>
+
+            <div className="form-group col-6">
+              <label>Gravidade</label>
+              <select value={gravidade} onChange={(e) => setGravidade(e.target.value)}>
+                <option value="Leve">Leve • Orientação em Sala</option>
+                <option value="Moderada">Moderada • Encaminhamento à Direção</option>
+                <option value="Grave">Grave • Comunicação aos Responsáveis</option>
+              </select>
+            </div>
+
+            <div className="form-group col-12">
+              <label>Relato Detalhado do Ocorrido</label>
+              <textarea
+                rows={3}
+                required
+                placeholder="Descreva objetivamente o ocorrido..."
+                value={descricao}
+                onChange={(e) => setDescricao(e.target.value)}
+              />
+            </div>
+
+            <div className="form-group col-12">
+              <label>Providências Tomadas / Encaminhamentos (Opcional)</label>
               <input
                 type="text"
-                placeholder="Encaminhamento realizado..."
-                value={form.providencia}
-                onChange={(e) => setForm({ ...form, providencia: e.target.value })}
-              />
-            </div>
-
-            <div className="form-group col-12">
-              <label>Descrição</label>
-              <textarea
-                rows={2}
-                required
-                placeholder="Descreva o registro..."
-                value={form.descricao}
-                onChange={(e) => setForm({ ...form, descricao: e.target.value })}
-                style={{ padding: 10, borderRadius: 8, border: '1px solid var(--border)', fontFamily: 'inherit' }}
-              />
-            </div>
-
-            <div className="form-group col-12">
-              <label>Documento Anexo</label>
-              <input
-                type="file"
-                accept=".pdf,image/*"
-                onChange={(e) => setArquivo(e.target.files?.[0] || null)}
+                placeholder="Ex: Conversa com o aluno, bilhete na agenda, contato telefônico com responsável..."
+                value={providencias}
+                onChange={(e) => setProvidencias(e.target.value)}
               />
             </div>
           </div>
 
-          <button type="submit" className="btn-primary" disabled={salvando} style={{ width: 'auto', padding: '10px 22px' }}>
-            {salvando ? 'Salvando...' : 'Salvar Ocorrência'}
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={salvando}
+            style={{ width: 'auto', padding: '11px 24px' }}
+          >
+            {salvando ? 'Registrando...' : 'Salvar Ocorrência'}
           </button>
         </form>
       </section>
 
+      {/* HISTÓRICO DE OCORRÊNCIAS (INDIVIDUAL PARA PROFESSOR / COMPLETO PARA DIREÇÃO E ADMIN) */}
       <section className="panel-card">
         <div className="panel-header">
-          <h3>Histórico de Ocorrências • {ocorrencias.length}</h3>
+          <div>
+            <h3>
+              {ehGestao
+                ? `Histórico Geral de Ocorrências da Escola • ${ocorrenciasFiltradas.length}`
+                : `Minhas Ocorrências Registradas • ${ocorrenciasFiltradas.length}`}
+            </h3>
+            <p style={{ fontSize: '0.85rem', color: '#64748b', marginTop: 4 }}>
+              {ehGestao
+                ? 'Visualização completa de todos os registros efetuados por professores e equipe.'
+                : 'Histórico individual das ocorrências registradas por você.'}
+            </p>
+          </div>
         </div>
 
-        {ocorrencias.length === 0 ? (
-          <p style={{ color: '#64748b' }}>Nenhuma ocorrência registrada.</p>
+        <div className="form-grid" style={{ marginBottom: 18 }}>
+          <div className="form-group col-6">
+            <label>Buscar por Aluno, Relato ou Servidor</label>
+            <input
+              type="text"
+              placeholder="Digite para filtrar..."
+              value={buscaTexto}
+              onChange={(e) => setBuscaTexto(e.target.value)}
+            />
+          </div>
+
+          <div className="form-group col-6">
+            <label>Filtrar por Turma</label>
+            <select value={filtroTurmaHist} onChange={(e) => setFiltroTurmaHist(e.target.value)}>
+              <option value="todas">Todas as Turmas</option>
+              {turmas.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.nome} • {t.turno}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {ocorrenciasFiltradas.length === 0 ? (
+          <p style={{ color: '#64748b' }}>Nenhuma ocorrência encontrada.</p>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {ocorrencias.map((oc) => (
-              <div
-                key={oc.id}
-                style={{
-                  padding: '14px 16px',
-                  border: '1px solid var(--border)',
-                  borderRadius: 10,
-                  background: '#fafcff',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 6 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {ocorrenciasFiltradas.map((oc) => (
+              <div key={oc.id} className="aviso-item">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' }}>
                   <div>
-                    <strong style={{ color: 'var(--primary)' }}>{oc.alunos?.nome_completo}</strong>{' '}
-                    <span style={{ fontSize: '0.82rem', color: '#64748b' }}>• {oc.turmas?.nome}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <span className="status-pill status-pendente">{oc.tipo}</span>
-                    <span style={{ fontSize: '0.82rem', color: '#64748b' }}>
-                      {oc.data_ocorrencia.split('-').reverse().join('/')}
-                    </span>
-                  </div>
-                </div>
-                <p style={{ fontSize: '0.9rem', color: '#334155', lineHeight: 1.5 }}>{oc.descricao}</p>
-                {oc.providencia && (
-                  <p style={{ fontSize: '0.84rem', color: '#475569', marginTop: 6 }}>
-                    <strong>Providência:</strong> {oc.providencia}
-                  </p>
-                )}
-                {oc.anexo_url && (
-                  <div style={{ marginTop: 10 }}>
-                    <a
-                      href={oc.anexo_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn-sm btn-approve"
-                      style={{ textDecoration: 'none', display: 'inline-block' }}
+                    <span
+                      className={`status-pill ${
+                        oc.gravidade === 'Grave'
+                          ? 'status-bloqueado'
+                          : oc.gravidade === 'Moderada'
+                          ? 'status-pendente'
+                          : 'status-ativo'
+                      }`}
+                      style={{ marginRight: 8 }}
                     >
-                      Ver Arquivo
-                    </a>
+                      {oc.gravidade || 'Leve'}
+                    </span>
+                    <strong style={{ color: 'var(--primary)', fontSize: '0.98rem' }}>
+                      {oc.alunos?.nome_completo}
+                    </strong>
+                    <span style={{ fontSize: '0.84rem', color: '#64748b', marginLeft: 8 }}>
+                      • {oc.turmas?.nome} ({oc.turmas?.turno}) • {oc.data_ocorrencia?.split('-').reverse().join('/')}
+                    </span>
+
+                    <div style={{ fontSize: '0.8rem', color: '#334155', marginTop: 5 }}>
+                      <strong>Registrado por:</strong> {oc.autor_nome || 'Não informado'}{' '}
+                      {oc.autor_cargo ? `(${oc.autor_cargo})` : ''} • <strong>Tipo:</strong> {oc.tipo_ocorrencia}
+                    </div>
+                  </div>
+
+                  {ehGestao ? (
+                    <select
+                      value={oc.status_acompanhamento || 'Registrada'}
+                      onChange={(e) => handleAtualizarStatus(oc.id, e.target.value)}
+                      style={{
+                        padding: '5px 8px',
+                        borderRadius: 6,
+                        border: '1px solid var(--border)',
+                        fontSize: '0.82rem',
+                        fontWeight: 600,
+                      }}
+                    >
+                      <option value="Registrada">Registrada</option>
+                      <option value="Em Acompanhamento">Em Acompanhamento</option>
+                      <option value="Responsável Notificado">Responsável Notificado</option>
+                      <option value="Concluída">Concluída</option>
+                    </select>
+                  ) : (
+                    <span className="status-pill status-ativo">
+                      {oc.status_acompanhamento || 'Registrada'}
+                    </span>
+                  )}
+                </div>
+
+                <p style={{ marginTop: 10, fontSize: '0.92rem', color: '#1e293b', lineHeight: 1.55 }}>
+                  {oc.descricao}
+                </p>
+
+                {oc.providencias && (
+                  <div style={{ marginTop: 8, fontSize: '0.84rem', color: '#475569' }}>
+                    <strong>Providências:</strong> {oc.providencias}
                   </div>
                 )}
-                <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: 8 }}>
-                  Registrado por {oc.registrado_por_nome}
-                </div>
               </div>
             ))}
           </div>

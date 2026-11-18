@@ -1,140 +1,207 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 
+const PODEM_GERENCIAR_EQUIPE = [
+  'Administrador(a) do Sistema',
+  'Secretário(a) Escolar',
+  'Diretor(a)',
+]
+
 export default function GestaoServidores({ perfilAtual }) {
   const [servidores, setServidores] = useState([])
   const [filtroStatus, setFiltroStatus] = useState('todos')
-  const [atualizandoId, setAtualizandoId] = useState(null)
+  const [carregando, setCarregando] = useState(true)
+
+  const podeGerenciar = PODEM_GERENCIAR_EQUIPE.includes(perfilAtual.cargo)
 
   useEffect(() => {
-    listarServidores()
+    carregarServidores()
   }, [])
 
-  async function listarServidores() {
-    const { data, error } = await supabase
+  async function carregarServidores() {
+    setCarregando(true)
+    const { data } = await supabase
       .from('perfis')
       .select('*')
-      .order('criado_em', { ascending: false })
+      .order('nome_completo')
 
-    if (!error && data) setServidores(data)
+    setServidores(data || [])
+    setCarregando(false)
   }
 
-  async function alterarStatusServidor(id, novoStatus) {
-    setAtualizandoId(id)
+  async function alterarStatus(id, novoStatus) {
+    if (!podeGerenciar) return
     const { error } = await supabase
       .from('perfis')
       .update({ status_aprovacao: novoStatus })
       .eq('id', id)
 
-    if (!error) await listarServidores()
-    else alert('Erro ao atualizar status: ' + error.message)
-    setAtualizandoId(null)
+    if (error) {
+      alert('Erro ao atualizar status: ' + error.message)
+    } else {
+      carregarServidores()
+    }
   }
 
-  const servidoresFiltrados = servidores.filter((s) =>
+  async function alterarCargo(id, novoCargo) {
+    if (!podeGerenciar) return
+    const { error } = await supabase
+      .from('perfis')
+      .update({ cargo: novoCargo })
+      .eq('id', id)
+
+    if (error) {
+      alert('Erro ao atualizar cargo: ' + error.message)
+    } else {
+      carregarServidores()
+    }
+  }
+
+  const listaFiltrada = servidores.filter((s) =>
     filtroStatus === 'todos' ? true : s.status_aprovacao === filtroStatus
   )
-
-  const qtdPendentes = servidores.filter((s) => s.status_aprovacao === 'pendente').length
 
   return (
     <section className="panel-card">
       <div className="panel-header">
         <div>
-          <h3>Autorização e Gestão de Servidores</h3>
+          <h3>Servidores e Equipe Escolar • {listaFiltrada.length}</h3>
           <p style={{ fontSize: '0.85rem', color: '#64748b', marginTop: 4 }}>
-            Aprove novos cadastros da equipe escolar ou gerencie acessos ativos.
+            {podeGerenciar
+              ? 'Gerencie acessos, cargos e aprovações da equipe escolar.'
+              : 'Consulta do corpo docente e equipe administrativa da escola (modo visualização).'}
           </p>
         </div>
 
         <div className="filter-tabs">
-          <button className={`tab-btn ${filtroStatus === 'todos' ? 'active' : ''}`} onClick={() => setFiltroStatus('todos')}>
-            Todos ({servidores.length})
+          <button
+            type="button"
+            className={`tab-btn ${filtroStatus === 'todos' ? 'active' : ''}`}
+            onClick={() => setFiltroStatus('todos')}
+          >
+            Todos
           </button>
-          <button className={`tab-btn ${filtroStatus === 'pendente' ? 'active' : ''}`} onClick={() => setFiltroStatus('pendente')}>
-            Pendentes ({qtdPendentes})
-          </button>
-          <button className={`tab-btn ${filtroStatus === 'ativo' ? 'active' : ''}`} onClick={() => setFiltroStatus('ativo')}>
+          <button
+            type="button"
+            className={`tab-btn ${filtroStatus === 'ativo' ? 'active' : ''}`}
+            onClick={() => setFiltroStatus('ativo')}
+          >
             Ativos
           </button>
-          <button className={`tab-btn ${filtroStatus === 'bloqueado' ? 'active' : ''}`} onClick={() => setFiltroStatus('bloqueado')}>
-            Bloqueados
-          </button>
+          {podeGerenciar && (
+            <>
+              <button
+                type="button"
+                className={`tab-btn ${filtroStatus === 'pendente' ? 'active' : ''}`}
+                onClick={() => setFiltroStatus('pendente')}
+              >
+                Pendentes
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${filtroStatus === 'bloqueado' ? 'active' : ''}`}
+                onClick={() => setFiltroStatus('bloqueado')}
+              >
+                Bloqueados
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      <div className="table-responsive">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Servidor</th>
-              <th>Cargo / Turno</th>
-              <th>Contato / CPF</th>
-              <th>Status</th>
-              <th>Ações</th>
-            </tr>
-          </thead>
-          <tbody>
-            {servidoresFiltrados.length === 0 ? (
+      {carregando ? (
+        <p style={{ color: '#64748b' }}>Carregando equipe...</p>
+      ) : (
+        <div className="table-responsive">
+          <table className="data-table">
+            <thead>
               <tr>
-                <td colSpan="5" style={{ textAlign: 'center', color: '#64748b', padding: 24 }}>
-                  Nenhum servidor encontrado neste filtro.
-                </td>
+                <th>Servidor</th>
+                <th>Cargo / Área</th>
+                <th>Turno</th>
+                <th>Contato</th>
+                <th>Status</th>
+                {podeGerenciar && <th>Ações</th>}
               </tr>
-            ) : (
-              servidoresFiltrados.map((srv) => (
-                <tr key={srv.id}>
+            </thead>
+            <tbody>
+              {listaFiltrada.map((s) => (
+                <tr key={s.id}>
                   <td>
-                    <strong>{srv.nome_completo}</strong>
-                    <div style={{ fontSize: '0.8rem', color: '#64748b' }}>{srv.email}</div>
+                    <strong>{s.nome_completo}</strong>
+                    <div style={{ fontSize: '0.78rem', color: '#64748b' }}>{s.email}</div>
                   </td>
                   <td>
-                    <div>{srv.cargo}</div>
-                    <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                      Turno: {srv.turno} {srv.matricula ? `• Mat: ${srv.matricula}` : ''}
-                    </div>
-                  </td>
-                  <td>
-                    <div>{srv.telefone}</div>
-                    <div style={{ fontSize: '0.8rem', color: '#64748b' }}>CPF: {srv.cpf}</div>
-                  </td>
-                  <td>
-                    <span className={`status-pill status-${srv.status_aprovacao}`}>
-                      {srv.status_aprovacao}
-                    </span>
-                  </td>
-                  <td>
-                    {srv.id === perfilAtual.id ? (
-                      <span style={{ fontSize: '0.8rem', color: '#64748b' }}>Você (Admin atual)</span>
+                    {podeGerenciar && s.id !== perfilAtual.id ? (
+                      <select
+                        value={s.cargo}
+                        onChange={(e) => alterarCargo(s.id, e.target.value)}
+                        style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', fontSize: '0.84rem' }}
+                      >
+                        <option value="Professor(a)">Professor(a)</option>
+                        <option value="Secretário(a) Escolar">Secretário(a) Escolar</option>
+                        <option value="Diretor(a)">Diretor(a)</option>
+                        <option value="Supervisor(a) Pedagógico(a)">Supervisor(a) Pedagógico(a)</option>
+                        <option value="Administrador(a) do Sistema">Administrador(a) do Sistema</option>
+                      </select>
                     ) : (
-                      <div className="action-group">
-                        {srv.status_aprovacao !== 'ativo' && (
-                          <button
-                            className="btn-sm btn-approve"
-                            disabled={atualizandoId === srv.id}
-                            onClick={() => alterarStatusServidor(srv.id, 'ativo')}
-                          >
-                            Autorizar
-                          </button>
-                        )}
-                        {srv.status_aprovacao !== 'bloqueado' && (
-                          <button
-                            className="btn-sm btn-block"
-                            disabled={atualizandoId === srv.id}
-                            onClick={() => alterarStatusServidor(srv.id, 'bloqueado')}
-                          >
-                            Bloquear
-                          </button>
-                        )}
+                      <span>{s.cargo}</span>
+                    )}
+                    {s.disciplina_principal && (
+                      <div style={{ fontSize: '0.76rem', color: 'var(--primary)', marginTop: 2 }}>
+                        {s.disciplina_principal}
                       </div>
                     )}
                   </td>
+                  <td>{s.turno || '-'}</td>
+                  <td>{s.telefone || '-'}</td>
+                  <td>
+                    <span
+                      className={`status-pill ${
+                        s.status_aprovacao === 'ativo'
+                          ? 'status-ativo'
+                          : s.status_aprovacao === 'bloqueado'
+                          ? 'status-bloqueado'
+                          : 'status-pendente'
+                      }`}
+                    >
+                      {s.status_aprovacao}
+                    </span>
+                  </td>
+                  {podeGerenciar && (
+                    <td>
+                      {s.id !== perfilAtual.id ? (
+                        <div className="action-group">
+                          {s.status_aprovacao !== 'ativo' && (
+                            <button
+                              type="button"
+                              onClick={() => alterarStatus(s.id, 'ativo')}
+                              className="btn-sm btn-approve"
+                            >
+                              Aprovar
+                            </button>
+                          )}
+                          {s.status_aprovacao !== 'bloqueado' && (
+                            <button
+                              type="button"
+                              onClick={() => alterarStatus(s.id, 'bloqueado')}
+                              className="btn-sm btn-block"
+                            >
+                              Bloquear
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Você</span>
+                      )}
+                    </td>
+                  )}
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   )
 }
